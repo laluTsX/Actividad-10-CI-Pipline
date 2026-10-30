@@ -1,4 +1,4 @@
-name: CI Pipeline Laravel
+name: CI Pipeline Laravel (mejorado)
 
 on:
   push:
@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   ci:
@@ -26,6 +30,17 @@ jobs:
           php-version: '8.2'
           extensions: mbstring, xml, sqlite3, pdo_sqlite
           coverage: none
+
+      - name: Obtener directorio de caché de Composer
+        id: composer-cache
+        run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
+
+      - name: Restaurar caché de Composer
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: composer-${{ runner.os }}-${{ hashFiles('composer.lock') }}
+          restore-keys: composer-${{ runner.os }}-
 
       - name: Instalar dependencias (Composer)
         run: composer install --prefer-dist --no-progress --no-interaction
