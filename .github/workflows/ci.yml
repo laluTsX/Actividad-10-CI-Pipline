@@ -1,0 +1,83 @@
+name: CI Pipeline Laravel
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  ci:
+    name: Validación de cambios
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Registrar inicio del pipeline
+        run: echo "INICIO_PIPELINE=$(date +%s)" >> "$GITHUB_ENV"
+
+      - name: Obtener código
+        uses: actions/checkout@v4
+
+      - name: Configurar PHP 8.2
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: mbstring, xml, sqlite3, pdo_sqlite
+          coverage: none
+
+      - name: Instalar dependencias (Composer)
+        run: composer install --prefer-dist --no-progress --no-interaction
+
+      - name: Preparar entorno de pruebas
+        run: |
+          cp .env.example .env
+          php artisan key:generate
+          touch database/database.sqlite
+          php artisan migrate --force
+          mkdir -p reports
+
+      # ETAPA 1: análisis estático
+      - name: Análisis estático (sintaxis PHP + Laravel Pint)
+        id: estatico
+        run: |
+          find app routes tests config database -name '*.php' -print0 | xargs -0 -n1 php -l > /dev/null
+          vendor/bin/pint --test
+
+      # ETAPA 2: pruebas unitarias
+      - name: Pruebas unitarias
+        id: unitarias
+        run: vendor/bin/phpunit --testsuite Unit --log-junit reports/unit.xml
+
+      # ETAPA 3: pruebas de integración y regresión
+      - name: Pruebas de integración y regresión (Feature)
+        id: feature
+        run: vendor/bin/phpunit --testsuite Feature --log-junit reports/feature.xml
+
+      # ETAPA 4: rendimiento en entorno controlado (servidor local del runner)
+      - name: Pruebas de rendimiento (entorno controlado)
+        id: rendimiento
+        env:
+          SESSION_DRIVER: file
+          APP_ENV: testing
+        run: |
+          php artisan serve --host=127.0.0.1 --port=8000 > reports/server.log 2>&1 &
+          sleep 5
+          bash scripts/performance-test.sh http://127.0.0.1:8000/health 50 500
+
+      - name: Resumen de métricas
+        if: always()
+        env:
+          RES_ESTATICO: ${{ steps.estatico.outcome }}
+          RES_UNITARIAS: ${{ steps.unitarias.outcome }}
+          RES_FEATURE: ${{ steps.feature.outcome }}
+          RES_RENDIMIENTO: ${{ steps.rendimiento.outcome }}
+        run: php scripts/metricas.php
+
+      - name: Guardar reportes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reportes-ci-${{ github.run_number }}
+          path: reports/
