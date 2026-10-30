@@ -10,7 +10,7 @@ Route::get('/', function () {
 // regresión y rendimiento del pipeline de CI.
 Route::get('/health', function () {
     return response()->json([
-        'status' => 'ok',
+        'status' => 'error',
         'app' => config('app.name'),
     ]);
 });
