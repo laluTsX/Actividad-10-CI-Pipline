@@ -21,3 +21,5 @@ yarn-error.log
 /reports/*.xml
 /reports/*.txt
 /reports/*.log
+
+/dist

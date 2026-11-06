@@ -1,8 +1,9 @@
-name: CI Pipeline Laravel (mejorado)
+name: CI/CD Pipeline Laravel
 
 on:
   push:
     branches: [main]
+    tags: ['v*.*.*']
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -96,3 +97,126 @@ jobs:
         with:
           name: reportes-ci-${{ github.run_number }}
           path: reports/
+
+  # =====================================================================
+  # ACTIVIDAD 12: liberación de artefactos (solo si el CI terminó en verde)
+  # =====================================================================
+  release:
+    name: Generar artefacto de liberación
+    needs: ci
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+
+    steps:
+      - name: Obtener código
+        uses: actions/checkout@v4
+
+      - name: Configurar PHP 8.2
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: mbstring, xml, sqlite3, pdo_sqlite
+          coverage: none
+
+      - name: Obtener directorio de caché de Composer
+        id: composer-cache
+        run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
+
+      - name: Restaurar caché de Composer
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: composer-${{ runner.os }}-${{ hashFiles('composer.lock') }}
+          restore-keys: composer-${{ runner.os }}-
+
+      - name: Instalar dependencias de PRODUCCIÓN (sin dev)
+        run: composer install --no-dev --prefer-dist --no-progress --no-interaction --optimize-autoloader
+
+      - name: Definir versión (SemVer)
+        id: version
+        run: |
+          BASE="$(cat VERSION)"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="${BASE}-rc.${GITHUB_RUN_NUMBER}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Versión a liberar: ${VERSION}"
+
+      - name: Generar artefacto de liberación
+        run: bash scripts/preparar-release.sh "${{ steps.version.outputs.version }}"
+
+      - name: Publicar artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: laravel-release-${{ steps.version.outputs.version }}
+          path: |
+            dist/laravel-release-${{ steps.version.outputs.version }}.tar.gz
+            dist/laravel-release-${{ steps.version.outputs.version }}.tar.gz.sha256
+          retention-days: 7
+
+      - name: Publicar GitHub Release (solo cuando se sube una etiqueta vX.Y.Z)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/laravel-release-${{ steps.version.outputs.version }}.tar.gz
+            dist/laravel-release-${{ steps.version.outputs.version }}.tar.gz.sha256
+
+  preproduccion:
+    name: Entrega a preproducción (ambiente de pruebas)
+    needs: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: preproduccion
+
+    steps:
+      - name: Obtener scripts del repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar PHP 8.2 (mismo que el ambiente de preproducción)
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.2'
+          extensions: mbstring, xml, sqlite3, pdo_sqlite
+          coverage: none
+
+      - name: Descargar artefacto
+        uses: actions/download-artifact@v4
+        with:
+          name: laravel-release-${{ needs.release.outputs.version }}
+          path: entrega
+
+      - name: Validar artefacto (contenido, dependencias y datos sensibles)
+        run: bash scripts/validar-artefacto.sh "entrega/laravel-release-${{ needs.release.outputs.version }}.tar.gz"
+
+      - name: Instalar en el ambiente de pruebas y probar /health
+        run: |
+          mkdir -p "$RUNNER_TEMP/preproduccion"
+          tar -xzf "entrega/laravel-release-${{ needs.release.outputs.version }}.tar.gz" -C "$RUNNER_TEMP/preproduccion"
+          bash "$RUNNER_TEMP/preproduccion/laravel-release/scripts/instalar-preproduccion.sh" "$RUNNER_TEMP/preproduccion/laravel-release" --smoke
+
+      - name: Resumen de la entrega
+        if: success()
+        run: |
+          {
+            echo "## Entrega a preproducción"
+            echo
+            echo "- Versión entregada: \`${{ needs.release.outputs.version }}\`"
+            echo "- Ambiente: preproduccion (PHP 8.2, SQLite de pruebas, APP_ENV=staging)"
+            echo "- Prueba de humo \`/health\`: OK"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Guardar reporte de validación
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reporte-validacion-${{ needs.release.outputs.version }}
+          path: reports/validacion-artefacto.md
